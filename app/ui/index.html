@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SenseBridge</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-tone="off">
+
+<header class="titlebar" data-tauri-drag-region>
+  <div class="brand" data-tauri-drag-region>
+    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="2.6" fill="currentColor"/>
+      <path d="M7.4 7.6a6.2 6.2 0 0 0 0 8.8M16.6 7.6a6.2 6.2 0 0 1 0 8.8M4.4 4.8a10.2 10.2 0 0 0 0 14.4M19.6 4.8a10.2 10.2 0 0 1 0 14.4"
+            fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </svg>
+    <span data-tauri-drag-region>SenseBridge</span>
+  </div>
+  <div class="window-buttons">
+    <button id="minimize" type="button" aria-label="Minimize" title="Minimize">
+      <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8" /></svg>
+    </button>
+    <button id="close" type="button" aria-label="Close" title="Close">
+      <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" /></svg>
+    </button>
+  </div>
+</header>
+
+<main>
+  <section class="hero" aria-live="polite">
+    <div class="orb" id="orb" aria-hidden="true">
+      <span class="ring ring-3"></span>
+      <span class="ring ring-2"></span>
+      <span class="ring ring-1"></span>
+      <span class="core">
+        <svg viewBox="0 0 48 48">
+          <path d="M14.5 15h19c3.6 0 6.3 2.6 7 6.2l1.8 9.300c.6 3.200-1.300 5.500-3.900 5.500-1.700 0-3.100-.9-4.100-2.400l-2.300-3.600H16l-2.300 3.600c-1 1.500-2.400 2.400-4.100 2.400-2.600 0-4.500-2.300-3.900-5.500l1.800-9.300c.7-3.600 3.400-6.200 7-6.200z"
+                fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/>
+          <path d="M15.500 20.500v5M13 23h5" fill="none" stroke="currentColor" stroke-width="2.200" stroke-linecap="round"/>
+          <circle cx="32.500" cy="21" r="1.500" fill="currentColor"/>
+          <circle cx="35.500" cy="24.500" r="1.500" fill="currentColor"/>
+        </svg>
+      </span>
+    </div>
+    <h1 id="title">Off</h1>
+    <p id="text">Turn on to give games haptics and adaptive triggers over Bluetooth.</p>
+    <div class="hero-actions">
+      <button id="power" type="button" class="primary">Turn on</button>
+      <button id="action" type="button" class="secondary" hidden></button>
+    </div>
+  </section>
+
+  <section class="chips" aria-label="Status">
+    <div class="chip" id="chip-controller">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 6.500l8 7-4 3.500V3l4 3.500-8 7" /></svg>
+      <div><span class="chip-label">Controller</span><span class="chip-value" id="controller-value">Not found</span></div>
+    </div>
+    <div class="chip" id="chip-windows" title="Whether Windows has the virtual wired controller attached">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.500l6-1v5H3zM10.500 4.300L17 3.200v6.300h-6.500zM3 11h6v5l-6-1zM10.500 11H17v6.300l-6.500-1.100z" class="filled"/></svg>
+      <div><span class="chip-label">Windows</span><span class="chip-value" id="windows-value">Waiting</span></div>
+    </div>
+    <div class="chip" id="chip-haptics">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10h2.500l2-5 3.500 10 3-7 1.500 2H18" /></svg>
+      <div><span class="chip-label">Haptics</span><span class="chip-value" id="haptics-value">Idle</span></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <label for="strength">Haptic strength</label>
+      <output id="strength-value" for="strength">100%</output>
+    </div>
+    <div class="slider-row">
+      <div class="slider">
+        <input id="strength" type="range" min="0" max="200" step="5" value="100"
+               aria-describedby="strength-hint">
+        <span class="slider-mark" aria-hidden="true"></span>
+      </div>
+      <button id="test" type="button" class="ghost" disabled>Test</button>
+    </div>
+    <p class="hint" id="strength-hint">100% feels like the controller on a cable.</p>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><span id="response-label">Response</span></div>
+    <div class="segmented" role="radiogroup" aria-labelledby="response-label">
+      <button type="button" role="radio" data-response="fast" aria-checked="true">Fastest</button>
+      <button type="button" role="radio" data-response="balanced" aria-checked="false">Balanced</button>
+      <button type="button" role="radio" data-response="smooth" aria-checked="false">Smoothest</button>
+    </div>
+    <p class="hint" id="response-hint">Lowest delay. Best when the controller is close to the PC.</p>
+  </section>
+
+  <section class="card options">
+    <label class="option">
+      <span><b>Turn on when the app opens</b><small>Start bridging without pressing the button.</small></span>
+      <input type="checkbox" id="start-on-launch" class="switch">
+    </label>
+    <label class="option">
+      <span><b>Open at sign-in</b><small>Starts in the tray, ready before you play.</small></span>
+      <input type="checkbox" id="open-at-sign-in" class="switch">
+    </label>
+    <label class="option">
+      <span><b>Keep running when closed</b><small>The close button hides the window; quit from the tray.</small></span>
+      <input type="checkbox" id="close-to-tray" class="switch">
+    </label>
+  </section>
+</main>
+
+<footer>
+  <span id="version"></span>
+  <span class="links">
+    <button type="button" class="link" data-link="project">Source</button>
+    <button type="button" class="link" data-link="saxense" title="The haptics report format comes from SAxense">Built on SAxense</button>
+  </span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+[package]
+name = "sensebridge-cli"
+description = "Headless SenseBridge engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sensebridge-cli"
+path = "src/main.rs"
+
+[dependencies]
+sensebridge-engine = { path = "../engine" }
+serde_json = "1"

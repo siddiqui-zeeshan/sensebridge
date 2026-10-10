@@ -1,0 +1,22 @@
+[package]
+name = "sensebridge"
+description = "DualSense haptics and adaptive triggers over Bluetooth on Windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sensebridge"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+sensebridge-engine = { path = "../../engine" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+winreg = "0.55"

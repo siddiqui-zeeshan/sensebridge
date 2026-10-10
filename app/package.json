@@ -1,0 +1,14 @@
+{
+  "name": "sensebridge-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Build tooling for the SenseBridge app. The interface itself is plain HTML, CSS and JavaScript in ui/ with no build step.",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icon": "tauri icon app-icon.png"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
