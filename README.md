@@ -34,7 +34,7 @@ sends to it to your real controller over Bluetooth. No dongle or other hardware.
 1. Install the [usbip-win2](https://github.com/vadimgrn/usbip-win2/releases/latest)
    driver. It is the signed driver that lets a program present a USB device to
    Windows. SenseBridge tells you if it is missing.
-2. Download `sensebridge.exe` from the [releases page](../../releases) and put it
+2. Download `sensebridge.exe` from the [releases page](https://github.com/siddiqui-zeeshan/sensebridge/releases) and put it
    anywhere. There is no installer.
 3. Pair the controller over Bluetooth as usual and run `sensebridge.exe`.
 

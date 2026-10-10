@@ -6,7 +6,7 @@ members = ["engine", "cli", "app/src-tauri"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/OWNER/sensebridge"
+repository = "https://github.com/siddiqui-zeeshan/sensebridge"
 
 [profile.release]
 opt-level = 3
