@@ -1,7 +1,7 @@
 //! The emulated DualSense seen from a USB/IP client. No controller or driver needed.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -403,4 +403,155 @@ fn closing_the_connection_stops_the_speaker_and_frees_the_device() {
     }
     assert!(rig.server.session().is_none());
     rig.attach(); // and it can be attached again
+}
+
+/// Whether the server ends the connection within `within`.
+fn closed_by_server(sock: &mut TcpStream, within: Duration) -> bool {
+    sock.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    let deadline = Instant::now() + within;
+    let mut buf = [0u8; 4096];
+    while Instant::now() < deadline {
+        match sock.read(&mut buf) {
+            Ok(0) => return true,
+            Ok(_) => {}
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
+fn import_request() -> Vec<u8> {
+    let mut msg = usbip::VERSION.to_be_bytes().to_vec();
+    msg.extend(usbip::OP_REQ_IMPORT.to_be_bytes());
+    msg.extend(0u32.to_be_bytes());
+    msg.extend(b"1-1");
+    msg.resize(8 + usbip::BUSID_SIZE, 0);
+    msg
+}
+
+#[test]
+fn a_transfer_claiming_an_absurd_size_ends_the_connection() {
+    let mut rig = Rig::new();
+    rig.attach();
+    rig.submit(DIR_OUT, 3, [0; 8], &[], 0x7FFF_FFFF, &[]);
+    assert!(
+        closed_by_server(rig.sock.as_mut().unwrap(), Duration::from_secs(2)),
+        "the server went on waiting for 2 GiB of payload"
+    );
+}
+
+#[test]
+fn microphone_packets_claiming_an_absurd_size_end_the_connection() {
+    let mut rig = Rig::new();
+    rig.attach();
+    let packets = vec![(0u32, u32::MAX); 1024];
+    rig.submit(DIR_IN, 2, [0; 8], &[], 1536, &packets);
+    assert!(closed_by_server(rig.sock.as_mut().unwrap(), Duration::from_secs(2)));
+}
+
+#[test]
+fn too_many_isochronous_packets_end_the_connection() {
+    let mut rig = Rig::new();
+    rig.attach();
+    // By hand: the header claims more packet descriptors than any host sends.
+    let mut msg = Vec::new();
+    for v in [usbip::CMD_SUBMIT, 1, 0x0001_0002, DIR_IN, 2, 0, 1536, 0, 100_000, 0] {
+        msg.extend(v.to_be_bytes());
+    }
+    msg.extend([0u8; 8]);
+    rig.send(&msg);
+    assert!(closed_by_server(rig.sock.as_mut().unwrap(), Duration::from_secs(2)));
+}
+
+#[test]
+fn a_client_that_queues_transfers_without_end_is_dropped() {
+    let mut rig = Rig::new();
+    rig.attach();
+    rig.sock.as_ref().unwrap().set_write_timeout(Some(Duration::from_secs(1))).unwrap();
+    // Completions leave at one per millisecond; these arrive far faster.
+    for seq in 1..=20_000u32 {
+        let mut msg = Vec::new();
+        for v in [usbip::CMD_SUBMIT, seq, 0x0001_0002, DIR_IN, 2, 0, 192, 0, 1, 0] {
+            msg.extend(v.to_be_bytes());
+        }
+        msg.extend([0u8; 8]);
+        for v in [0u32, 192, 0, 0] {
+            msg.extend(v.to_be_bytes());
+        }
+        if rig.sock.as_mut().unwrap().write_all(&msg).is_err() {
+            return; // already dropped
+        }
+    }
+    assert!(closed_by_server(rig.sock.as_mut().unwrap(), Duration::from_secs(2)));
+}
+
+#[test]
+fn closing_does_not_wait_for_a_client_that_stopped_reading() {
+    let mut rig = Rig::new();
+    rig.attach();
+    rig.sock.as_ref().unwrap().set_write_timeout(Some(Duration::from_millis(500))).unwrap();
+    // Ask for the configuration descriptor until the replies nobody reads have filled
+    // the socket and the server is stuck writing one.
+    let setup = Rig::setup(0x80, 6, 0x0200, 0, 1024);
+    let mut msg = Vec::new();
+    for v in [usbip::CMD_SUBMIT, 1, 0x0001_0002, DIR_IN, 0, 0, 1024, 0, 0xFFFF_FFFF, 0] {
+        msg.extend(v.to_be_bytes());
+    }
+    msg.extend(setup);
+    let mut stuck = false;
+    for _ in 0..2_000_000 {
+        if rig.sock.as_mut().unwrap().write_all(&msg).is_err() {
+            stuck = true;
+            break;
+        }
+    }
+    assert!(stuck, "could not fill the socket");
+
+    let server = Arc::clone(&rig.server);
+    let (done, finished) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        server.close();
+        let _ = done.send(());
+    });
+    assert!(
+        finished.recv_timeout(Duration::from_secs(3)).is_ok(),
+        "close() is still waiting on the stuck write"
+    );
+}
+
+#[test]
+fn two_clients_importing_at_the_same_moment_do_not_both_get_the_device() {
+    for round in 0..30 {
+        let rig = Rig::new();
+        let address = rig.server.address();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let clients: Vec<_> = (0..2)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let mut sock = TcpStream::connect(address).unwrap();
+                    sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    barrier.wait();
+                    sock.write_all(&import_request()).unwrap();
+                    let mut reply = [0u8; 8];
+                    sock.read_exact(&mut reply).unwrap();
+                    (be32(&reply, 4), sock)
+                })
+            })
+            .collect();
+        let results: Vec<_> = clients.into_iter().map(|c| c.join().unwrap()).collect();
+        let accepted = results.iter().filter(|(status, _)| *status == 0).count();
+        assert_eq!(accepted, 1, "round {round}");
+    }
+}
+
+#[test]
+fn a_connection_that_never_asks_for_anything_is_dropped() {
+    let rig = Rig::new();
+    let mut idle = TcpStream::connect(rig.server.address()).unwrap();
+    assert!(
+        closed_by_server(&mut idle, Duration::from_secs(5)),
+        "an idle connection was kept open"
+    );
 }

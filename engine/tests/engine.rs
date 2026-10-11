@@ -110,3 +110,43 @@ fn a_busy_port_is_reported_and_retried_until_it_frees() {
     assert!(wait_for(&states, "attaching"), "did not recover: {:?}", states.lock().unwrap());
     engine.stop();
 }
+
+/// The app's event handler hands work to the window's thread and waits for it. When
+/// that thread is the one stopping the engine, neither may wait on the other.
+#[test]
+fn stopping_does_not_wait_for_a_handler_that_waits_for_the_stopper() {
+    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let (release, stopper_is_free) = std::sync::mpsc::channel::<()>();
+    let stopper_is_free = Mutex::new(stopper_is_free);
+    let serving = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = Arc::clone(&serving);
+    let engine = Engine::start_with(
+        Config { port, attach: false, ..Config::default() },
+        Arc::new(move |event| {
+            let Event::State { state, .. } = event else { return };
+            match state.as_str() {
+                "attaching" => seen.store(true, std::sync::atomic::Ordering::Relaxed),
+                // Blocks until the thread that called stop() is free again.
+                "stopped" => {
+                    let _ = stopper_is_free.lock().unwrap().recv();
+                }
+                _ => {}
+            }
+        }),
+        Arc::new(FakeController),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !serving.load(std::sync::atomic::Ordering::Relaxed) {
+        assert!(Instant::now() < deadline, "never started serving");
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let (done, stopped) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        engine.stop();
+        let _ = done.send(());
+    });
+    let returned = stopped.recv_timeout(Duration::from_secs(3)).is_ok();
+    drop(release);
+    assert!(returned, "stop() and the event handler are waiting on each other");
+}

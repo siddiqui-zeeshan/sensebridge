@@ -20,6 +20,7 @@ pub mod descriptors;
 pub mod device;
 pub mod engine;
 pub mod hid;
+pub mod pattern;
 pub mod realtime;
 pub mod server;
 pub mod usbip;

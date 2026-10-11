@@ -1,7 +1,7 @@
 {
   "name": "sensebridge-app",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Build tooling for the SenseBridge app. The interface itself is plain HTML, CSS and JavaScript in ui/ with no build step.",
   "scripts": {
     "dev": "tauri dev",

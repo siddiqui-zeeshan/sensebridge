@@ -2,6 +2,7 @@
 //! that to Windows, keep it attached, and report what is going on.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -18,6 +19,8 @@ const STATUS_EVERY: Duration = Duration::from_millis(100);
 const ATTACH_RETRY: Duration = Duration::from_secs(3);
 const CONTROLLER_RETRY: Duration = Duration::from_secs(1);
 const PORT_RETRY: Duration = Duration::from_millis(500);
+/// How long stopping waits for the last events to be handed over.
+const DELIVERY_WAIT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
@@ -109,10 +112,39 @@ impl Shared {
     }
 }
 
+enum Delivery {
+    Event(Event),
+    /// Answered once everything sent before it has been handed over.
+    Flush(Sender<()>),
+}
+
+/// Hand events to `emit` from a thread of their own. The handler may wait on whoever is
+/// stopping the engine (an app's window thread, say), so the engine must never wait on
+/// the handler.
+fn deliver_on_own_thread(emit: Emit) -> (Emit, Sender<Delivery>) {
+    let (queue, deliveries) = mpsc::channel();
+    thread::spawn(move || {
+        for delivery in deliveries {
+            match delivery {
+                Delivery::Event(event) => emit(event),
+                Delivery::Flush(done) => {
+                    let _ = done.send(());
+                }
+            }
+        }
+    });
+    let sender = Mutex::new(queue.clone());
+    let emit: Emit = Arc::new(move |event| {
+        let _ = sender.lock().unwrap().send(Delivery::Event(event));
+    });
+    (emit, queue)
+}
+
 /// A running engine. Dropping it stops and detaches.
 pub struct Engine {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+    deliveries: Sender<Delivery>,
 }
 
 impl Engine {
@@ -121,6 +153,7 @@ impl Engine {
     }
 
     pub fn start_with(config: Config, emit: Emit, system: Arc<dyn HidSystem>) -> Self {
+        let (emit, deliveries) = deliver_on_own_thread(emit);
         let shared = Arc::new(Shared {
             quit: AtomicBool::new(false),
             gain: AtomicU32::new(config.gain.to_bits()),
@@ -136,7 +169,7 @@ impl Engine {
                 shared.state("stopped", "", "");
             })
         };
-        Self { shared, thread: Some(thread) }
+        Self { shared, thread: Some(thread), deliveries }
     }
 
     pub fn set_gain(&self, gain: f32) {
@@ -154,13 +187,11 @@ impl Engine {
         }
     }
 
-    /// Buzz the controller briefly. Returns whether a controller was there to buzz.
+    /// Play the test pattern on the controller. False when there is no controller, or
+    /// the pattern is already playing.
     pub fn test_haptics(&self) -> bool {
         match self.shared.backend.lock().unwrap().as_ref() {
-            Some(backend) if backend.connected() => {
-                backend.test_buzz();
-                true
-            }
+            Some(backend) if backend.connected() => backend.play_test(),
             _ => false,
         }
     }
@@ -173,6 +204,11 @@ impl Engine {
         self.shared.quit.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+            // Give "stopped" the chance to arrive, but do not insist on it.
+            let (done, flushed) = mpsc::channel();
+            if self.deliveries.send(Delivery::Flush(done)).is_ok() {
+                let _ = flushed.recv_timeout(DELIVERY_WAIT);
+            }
         }
     }
 }
@@ -278,8 +314,9 @@ fn run(shared: &Arc<Shared>, config: Config, system: Arc<dyn HidSystem>) {
     }
 
     *shared.backend.lock().unwrap() = None;
-    backend.stop();
+    // The server first: that frees anything of the controller's still writing to it.
     server.close();
+    backend.stop();
     if let Some(port) = usbip_port {
         usbipctl::detach(port);
     }

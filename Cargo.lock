@@ -2891,7 +2891,7 @@ dependencies = [
 
 [[package]]
 name = "sensebridge"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "sensebridge-engine",
  "serde",
@@ -2904,7 +2904,7 @@ dependencies = [
 
 [[package]]
 name = "sensebridge-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "sensebridge-engine",
  "serde_json",
@@ -2912,7 +2912,7 @@ dependencies = [
 
 [[package]]
 name = "sensebridge-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
 ]

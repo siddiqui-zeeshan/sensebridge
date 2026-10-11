@@ -17,6 +17,15 @@ use crate::device::{DualSenseDevice, EP_AUDIO_IN, EP_AUDIO_OUT, EP_HID_IN, EP_HI
 use crate::usbip::{self, IsoResult, Submit};
 
 const FRAME: Duration = Duration::from_millis(1);
+/// Largest transfer a client may ask for. The biggest real one is a few kilobytes of
+/// audio; anything near this is a broken or hostile client.
+const MAX_TRANSFER: usize = 64 * 1024;
+/// Transfers one client may have waiting at once. A real host keeps a handful.
+const MAX_WAITING: usize = 1024;
+/// How long a new connection has to say what it wants.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a reply may sit unsent before the client is taken for dead.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub type Log = Arc<dyn Fn(String) + Send + Sync>;
 
@@ -76,6 +85,8 @@ struct Schedule {
 /// One attached client: transfer dispatch for the lifetime of the connection.
 pub struct Session {
     writer: Mutex<TcpStream>,
+    /// The same socket, for shutting down while a write holds `writer`.
+    control: TcpStream,
     device: Arc<DualSenseDevice>,
     input: Mutex<InputState>,
     schedule: Mutex<Schedule>,
@@ -83,6 +94,10 @@ pub struct Session {
     alive: AtomicBool,
     started: Instant,
     pub stats: Stats,
+}
+
+fn refused(what: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, what)
 }
 
 fn read_exact(conn: &mut TcpStream, n: usize) -> io::Result<Vec<u8>> {
@@ -95,6 +110,7 @@ impl Session {
     fn new(conn: &TcpStream, device: Arc<DualSenseDevice>) -> io::Result<Arc<Self>> {
         Ok(Arc::new(Self {
             writer: Mutex::new(conn.try_clone()?),
+            control: conn.try_clone()?,
             device,
             input: Mutex::default(),
             schedule: Mutex::default(),
@@ -130,7 +146,9 @@ impl Session {
 
     fn close(&self) {
         self.alive.store(false, Ordering::Relaxed);
-        let _ = self.writer.lock().unwrap().shutdown(Shutdown::Both);
+        let _ = self.control.shutdown(Shutdown::Both);
+        // Under the lock, so the pacer cannot miss this between its check and its wait.
+        let _schedule = self.schedule.lock().unwrap();
         self.wake.notify_all();
     }
 
@@ -166,7 +184,11 @@ impl Session {
 
     fn submit(&self, conn: &mut TcpStream, header: &[u8; usbip::HEADER_SIZE]) -> io::Result<()> {
         let urb = Submit::parse(header);
-        let length = urb.length.max(0) as usize;
+        let length = usize::try_from(urb.length).ok().filter(|&n| n <= MAX_TRANSFER);
+        let Some(length) = length else { return Err(refused("transfer size")) };
+        if urb.number_of_packets > usbip::MAX_ISO_PACKETS {
+            return Err(refused("packet count"));
+        }
         let data = if urb.direction == usbip::DIR_OUT && length > 0 {
             read_exact(conn, length)?
         } else {
@@ -180,6 +202,12 @@ impl Session {
         } else {
             Vec::new()
         };
+        // Every packet must lie inside the transfer it belongs to.
+        if packets.iter().any(|&(offset, size)| offset.saturating_add(size) > length)
+            || packets.iter().map(|p| p.1).sum::<usize>() > length
+        {
+            return Err(refused("packet bounds"));
+        }
         let done: Vec<IsoResult> = packets
             .iter()
             .map(|&(offset, length)| IsoResult {
@@ -213,6 +241,9 @@ impl Session {
                 let mut input = self.input.lock().unwrap();
                 let report = input.fresh.take();
                 if report.is_none() {
+                    if input.pending.len() >= MAX_WAITING {
+                        return Err(refused("too many waiting transfers"));
+                    }
                     input.pending.push_back(urb.seqnum);
                 }
                 report
@@ -243,23 +274,31 @@ impl Session {
             self.device.backend.audio_out(&pcm);
             self.schedule(&urb, packets.len(), |frame| {
                 usbip::ret_submit(urb.seqnum, usbip::ST_OK, &[], Some(length as u32), frame, &done)
-            });
+            })?;
         } else if urb.ep == EP_AUDIO_IN && incoming && !packets.is_empty() {
             self.stats.iso_in.fetch_add(1, Ordering::Relaxed);
             // The microphone is not implemented: answer with silence.
             let silence = vec![0u8; packets.iter().map(|p| p.1).sum()];
             self.schedule(&urb, packets.len(), |frame| {
                 usbip::ret_submit(urb.seqnum, usbip::ST_OK, &silence, None, frame, &done)
-            });
+            })?;
         } else {
             self.stall(urb.seqnum);
         }
         Ok(())
     }
 
-    fn schedule(&self, urb: &Submit, packets: usize, make_reply: impl FnOnce(i32) -> Vec<u8>) {
+    fn schedule(
+        &self,
+        urb: &Submit,
+        packets: usize,
+        make_reply: impl FnOnce(i32) -> Vec<u8>,
+    ) -> io::Result<()> {
         let now = Instant::now();
         let mut schedule = self.schedule.lock().unwrap();
+        if schedule.queue.len() >= MAX_WAITING {
+            return Err(refused("too many waiting transfers"));
+        }
         let slot = &mut schedule.next_frame[(urb.ep & 0x0F) as usize];
         let start = slot.map_or(now, |next| next.max(now));
         let due = start + FRAME * packets as u32;
@@ -275,6 +314,7 @@ impl Session {
         }));
         drop(schedule);
         self.wake.notify_one();
+        Ok(())
     }
 
     fn pace(&self) {
@@ -402,6 +442,8 @@ impl Server {
     fn handle(&self, mut conn: TcpStream, peer: SocketAddr) -> io::Result<()> {
         conn.set_nonblocking(false)?;
         conn.set_nodelay(true)?;
+        conn.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+        conn.set_write_timeout(Some(WRITE_TIMEOUT))?;
         let common = read_exact(&mut conn, usbip::OP_COMMON_SIZE)?;
         let code = u16::from_be_bytes([common[2], common[3]]);
         match code {
@@ -409,12 +451,31 @@ impl Server {
             usbip::OP_REQ_IMPORT => {
                 let raw = read_exact(&mut conn, usbip::BUSID_SIZE)?;
                 let busid = raw.split(|&b| b == 0).next().unwrap_or(&[]);
-                if busid != DualSenseDevice::BUSID.as_bytes() || self.session().is_some() {
+                // Check and claim in one step, or two clients asking together both win.
+                let session = {
+                    let mut current = self.session.lock().unwrap();
+                    let free = !current.as_ref().is_some_and(|s| s.alive());
+                    if busid == DualSenseDevice::BUSID.as_bytes()
+                        && free
+                        && !self.stopping.load(Ordering::Relaxed)
+                    {
+                        let session = Session::new(&conn, Arc::clone(&self.device))?;
+                        *current = Some(Arc::clone(&session));
+                        Some(session)
+                    } else {
+                        None
+                    }
+                };
+                let Some(session) = session else {
                     return conn.write_all(&usbip::import_reply(None));
+                };
+                if let Err(error) = conn.write_all(&usbip::import_reply(Some(&self.device.info())))
+                {
+                    session.close();
+                    return Err(error);
                 }
-                conn.write_all(&usbip::import_reply(Some(&self.device.info())))?;
-                let session = Session::new(&conn, Arc::clone(&self.device))?;
-                *self.session.lock().unwrap() = Some(Arc::clone(&session));
+                // An attached host may be quiet for as long as it likes.
+                conn.set_read_timeout(None)?;
                 (self.log)(format!("attached from {peer}"));
                 session.run(conn);
                 (self.log)("detached".to_string());

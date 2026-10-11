@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod autostart;
+mod log;
 mod settings;
 
 use std::path::PathBuf;
@@ -15,6 +16,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow, WindowEvent};
 
+use log::Logger;
 use settings::{Response, Settings};
 
 const TRAY_ID: &str = "main";
@@ -31,6 +33,7 @@ struct AppState {
     settings_path: PathBuf,
     /// The engine's latest state, for a window that opens after it was reported.
     last_state: Arc<Mutex<Option<Event>>>,
+    log: Arc<Logger>,
 }
 
 impl AppState {
@@ -39,7 +42,7 @@ impl AppState {
         change(&mut settings);
         *settings = settings.clone().sanitised();
         if let Err(error) = settings.save(&self.settings_path) {
-            eprintln!("could not save settings: {error}");
+            self.log.line(&format!("could not save settings: {error}"));
         }
         settings.clone()
     }
@@ -67,6 +70,25 @@ fn tray_tooltip(event: &Event) -> Option<&'static str> {
     })
 }
 
+/// What goes in the log file: state changes and the engine's own messages, not the
+/// ten-a-second status.
+fn log_line(event: &Event) -> Option<String> {
+    match event {
+        Event::State { state, reason, detail } => {
+            let mut line = format!("state: {state}");
+            if !reason.is_empty() {
+                line.push_str(&format!(" ({reason})"));
+            }
+            if !detail.is_empty() {
+                line.push_str(&format!(": {detail}"));
+            }
+            Some(line)
+        }
+        Event::Log { text } => Some(text.clone()),
+        Event::Status(_) => None,
+    }
+}
+
 fn start_engine(app: &AppHandle) {
     let state = app.state::<AppState>();
     let mut engine = state.engine.lock().unwrap();
@@ -80,14 +102,23 @@ fn start_engine(app: &AppHandle) {
         ..Config::default()
     };
     let (app, last_state) = (app.clone(), Arc::clone(&state.last_state));
+    let log = Arc::clone(&state.log);
     *engine = Some(Engine::start(
         config,
         Arc::new(move |event| {
+            if let Some(line) = log_line(&event) {
+                log.line(&line);
+            }
             if let Some(tooltip) = tray_tooltip(&event) {
                 *last_state.lock().unwrap() = Some(event.clone());
-                if let Some(tray) = app.tray_by_id(TRAY_ID) {
-                    let _ = tray.set_tooltip(Some(tooltip));
-                }
+                // Posted, not awaited: the window's thread may be the one stopping the
+                // engine, and waiting on it from here would hang the app on quit.
+                let tray_app = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if let Some(tray) = tray_app.tray_by_id(TRAY_ID) {
+                        let _ = tray.set_tooltip(Some(tooltip));
+                    }
+                });
             }
             let _ = app.emit("engine", &event);
         }),
@@ -160,15 +191,18 @@ fn set_open_at_sign_in(value: bool) -> Result<bool, String> {
     Ok(autostart::enabled())
 }
 
-/// Buzz the controller. Returns false when there is no controller to buzz.
+/// Play the test haptics. Returns false when there is no controller to play them on.
 #[tauri::command]
 fn test_haptics(state: State<AppState>) -> bool {
     state.engine.lock().unwrap().as_ref().is_some_and(Engine::test_haptics)
 }
 
 #[tauri::command]
-fn open_link(name: String) {
-    if let Some((_, url)) = LINKS.iter().find(|(known, _)| *known == name) {
+fn open_link(state: State<AppState>, name: String) {
+    if name == "logs" {
+        let _ = std::fs::create_dir_all(state.log.dir());
+        let _ = Command::new("explorer.exe").arg(state.log.dir()).spawn();
+    } else if let Some((_, url)) = LINKS.iter().find(|(known, _)| *known == name) {
         let _ = Command::new("explorer.exe").arg(url).spawn();
     }
 }
@@ -245,10 +279,18 @@ fn main() {
                 .ok()
                 .and_then(|exe| Some(exe.parent()?.join("settings.json")))
                 .filter(|path| path.is_file());
-            let settings_path = match beside_exe {
-                Some(path) => path,
-                None => app.path().app_config_dir()?.join("settings.json"),
+            let (settings_path, log_dir) = match beside_exe {
+                Some(path) => {
+                    let logs = path.with_file_name("logs");
+                    (path, logs)
+                }
+                None => (
+                    app.path().app_config_dir()?.join("settings.json"),
+                    app.path().app_log_dir()?,
+                ),
             };
+            let log = Arc::new(Logger::new(log_dir));
+            log.line(&format!("SenseBridge {} started", env!("CARGO_PKG_VERSION")));
             let settings = Settings::load(&settings_path);
             let start_now = settings.start_on_launch;
             app.manage(AppState {
@@ -256,6 +298,7 @@ fn main() {
                 settings: Mutex::new(settings),
                 settings_path,
                 last_state: Arc::default(),
+                log,
             });
             build_tray(app.handle())?;
             if start_now {

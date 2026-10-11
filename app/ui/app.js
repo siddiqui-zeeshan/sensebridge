@@ -233,7 +233,7 @@ function demoBackend() {
   return {
     call: async (name) =>
       name === "snapshot"
-        ? { settings, running: !!engine, state: engine, open_at_sign_in: false, version: "0.1.0" }
+        ? { settings, running: !!engine, state: engine, open_at_sign_in: false, version: "0.1.1" }
         : name === "test_haptics",
   };
 }
@@ -274,9 +274,14 @@ function bind() {
 
   $("test").addEventListener("click", async () => {
     const button = $("test");
-    const felt = await backend.call("test_haptics");
-    button.textContent = felt ? "Buzzed" : "No controller";
-    setTimeout(() => (button.textContent = "Test"), 1200);
+    if (button.disabled) return;
+    button.disabled = true; // until the pattern has played: clicks must not pile up
+    const playing = await backend.call("test_haptics");
+    button.textContent = playing ? "Playing" : "No controller";
+    setTimeout(() => {
+      button.textContent = "Test";
+      button.disabled = false;
+    }, 1500);
   });
 
   const responses = [...document.querySelectorAll("[data-response]")];

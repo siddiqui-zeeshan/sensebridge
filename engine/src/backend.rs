@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::convert::{to_s8, Decimator, Frame};
 use crate::device::Backend;
+use crate::pattern;
 use crate::hid::{
     self, HidPort, HidSystem, BLUETOOTH_INPUT_LEN, HAPTICS_PACKET, HAPTICS_RATE, NEUTRAL_INPUT,
     PID_DUALSENSE_EDGE, USB_INPUT_LEN,
@@ -97,6 +98,8 @@ pub struct BluetoothBackend {
     /// Set once serving: from then on a USB DualSense in the list is our own.
     serving: AtomicBool,
     running: AtomicBool,
+    /// The test pattern is playing.
+    testing: AtomicBool,
     pub counts: Counts,
 }
 
@@ -149,6 +152,7 @@ impl BluetoothBackend {
             audio: Mutex::new(Audio { decimator: Decimator::default(), pending: Vec::new() }),
             gain: AtomicU32::new(gain.to_bits()),
             buffer_len: AtomicU8::new(buffer_len.max(MIN_BUFFER)),
+            testing: AtomicBool::new(false),
             peak: AtomicU32::new(0),
             seq: AtomicU8::new(0),
             counter: AtomicU8::new(0),
@@ -272,31 +276,34 @@ impl BluetoothBackend {
         self.counts.haptics.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Play a short tone straight to the controller, bypassing the host.
-    pub fn test_buzz(self: &Arc<Self>) {
-        const HZ: f32 = 160.0;
-        const SECONDS: f32 = 0.35;
+    /// Play the test pattern straight to the controller, bypassing the host. Returns
+    /// false, and plays nothing, while an earlier one is still playing.
+    pub fn play_test(self: &Arc<Self>) -> bool {
+        if self.testing.swap(true, Ordering::Relaxed) {
+            return false;
+        }
         let backend = Arc::clone(self);
         thread::spawn(move || {
             let frames = HAPTICS_PACKET / 2;
             let period = Duration::from_secs_f64(frames as f64 / HAPTICS_RATE as f64);
             let mut due = Instant::now();
-            for packet_index in 0..(SECONDS * HAPTICS_RATE as f32 / frames as f32) as usize {
+            for chunk in pattern::test_pattern().chunks(frames) {
+                if !backend.running.load(Ordering::Relaxed) {
+                    break;
+                }
                 let gain = backend.gain();
                 let mut packet = [0u8; HAPTICS_PACKET];
-                for i in 0..frames {
-                    let n = (packet_index * frames + i) as f32;
-                    let sample =
-                        0.8 * (2.0 * std::f32::consts::PI * HZ * n / HAPTICS_RATE as f32).sin();
-                    let value = to_s8(sample, gain) as u8;
-                    packet[2 * i] = value;
-                    packet[2 * i + 1] = value;
+                for (i, frame) in chunk.iter().enumerate() {
+                    packet[2 * i] = to_s8(frame[0], gain) as u8;
+                    packet[2 * i + 1] = to_s8(frame[1], gain) as u8;
                 }
                 backend.send_haptics(&packet);
                 due += period;
                 thread::sleep(due.saturating_duration_since(Instant::now()));
             }
+            backend.testing.store(false, Ordering::Relaxed);
         });
+        true
     }
 }
 
@@ -562,6 +569,17 @@ mod tests {
         system.present.store(false, Ordering::Relaxed);
         let result = BluetoothBackend::new(Arc::new(Shared(system)), 16, 1.0, Arc::new(|_| {}));
         assert_eq!(result.err(), Some(Unavailable::Wired));
+    }
+
+    #[test]
+    fn the_test_plays_the_whole_pattern_once_however_often_it_is_asked_for() {
+        let rig = rig();
+        assert!(rig.backend.play_test());
+        assert!(!rig.backend.play_test(), "a second test started over the first");
+        assert!(!rig.backend.play_test());
+        let reports = crate::pattern::test_pattern().len().div_ceil(HAPTICS_PACKET / 2) as u64;
+        assert!(wait_for(|| rig.backend.counts.haptics.load(Ordering::Relaxed) == reports));
+        assert!(wait_for(|| rig.backend.play_test()), "could not be played again");
     }
 
     #[test]

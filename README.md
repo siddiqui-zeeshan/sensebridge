@@ -13,7 +13,7 @@ sends to it to your real controller over Bluetooth. No dongle or other hardware.
 
 ## What works
 
-- High-fidelity haptics, at about the same delay as a cable. Measured from the
+- High-fidelity haptics, with no more delay than a cable. Measured from the
   game's audio to the controller moving: about 55 ms through SenseBridge against
   about 80 ms for the same controller on USB.
 - Adaptive triggers, light bar, player lights and rumble.
@@ -45,13 +45,19 @@ Settings are kept in `%APPDATA%\io.github.sensebridge\settings.json`. To keep th
 with the program instead, for example on a USB stick, put a `settings.json`
 containing `{}` beside `sensebridge.exe`.
 
+SenseBridge keeps a small log of what happened (controller lost, attach errors) in
+`%LOCALAPPDATA%\io.github.sensebridge\logs`, or in a `logs` folder beside the exe in
+the portable setup. **Logs** at the bottom of the window opens it. Files older than
+three days are deleted, and a day's file never grows past 512 KB.
+
 ## Use
 
 Open SenseBridge and leave it on. When it says **Ready**, start your game.
 
 - **Steam:** turn Steam Input off for the game (Properties, Controller), or Steam
   hands the game a generic gamepad and no haptics are sent.
-- **Haptic strength:** 100% sends what the game sent. Use **Test** to feel it.
+- **Haptic strength:** 100% sends what the game sent. **Test** plays a short
+  sequence on the controller: a tap on each side, a rumble rolling left to right, and a thud.
 - **Response:** how much the controller buffers. *Fastest* has the least delay;
   move towards *Smoothest* if haptics stutter.
 - Closing the window keeps SenseBridge in the tray. Quit from the tray icon.
